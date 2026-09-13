@@ -3682,6 +3682,26 @@ class Narrow(Base):
     value: bool  # error: [invalid-mutable-override]
 ```
 
+## Repeated dataclass field assignments
+
+An instance field cannot replace a class variable. Assigning a default separately from the field
+annotation does not introduce another override: the conflict belongs to the declaration.
+
+```py
+from typing import ClassVar
+from typing_extensions import dataclass_transform
+
+@dataclass_transform()
+class ModelMeta(type): ...
+
+class Base(metaclass=ModelMeta):
+    value: ClassVar[object]
+
+class Child(Base):
+    value: object  # error: [invalid-attribute-override]
+    value = None
+```
+
 ## Inherited storage conflicts
 
 A class variable selected by the MRO cannot satisfy a base contract that permits instance writes.
