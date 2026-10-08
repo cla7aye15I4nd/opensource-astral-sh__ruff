@@ -2306,9 +2306,8 @@ as something that must be supported by type checkers:
 
 ## Explicit `ClassVar` protocol implementations
 
-A protocol's `ClassVar` requirement applies to explicit subclasses as well as structural
-implementations. A regular attribute can override a class variable in a nominal base, but it does
-not satisfy the protocol's qualifier requirement. An unannotated initializer inherits the qualifier.
+Explicitly inheriting a protocol does not remove its `ClassVar` requirement. An implementation must
+keep that qualifier when it repeats the annotation.
 
 ```py
 from typing import ClassVar, Protocol
@@ -2316,30 +2315,35 @@ from typing import ClassVar, Protocol
 class HasValue(Protocol):
     value: ClassVar[int]
 
-class NominalBase:
-    value: ClassVar[int]
-
-class ImplicitRegular(NominalBase):
-    value: int = 1
-
 class ExplicitRegular(HasValue):
     value: int = 1  # error: [invalid-attribute-override]
 
 class ExplicitClassVar(HasValue):
-    value: ClassVar[int] = 1
+    value: ClassVar[int] = 1  # no diagnostic
+```
 
+An assignment without an annotation inherits the `ClassVar` qualifier.
+
+```py
 class Initialized(HasValue):
-    value = 1
+    value = 1  # no diagnostic
+```
 
+The requirement also applies to a subclass of a valid implementation.
+
+```py
 class Descendant(ExplicitClassVar):
     value: int = 1  # error: [invalid-attribute-override]
+```
 
-class Combined(ImplicitRegular, HasValue): ...  # error: [invalid-attribute-override]
+Inheriting an ordinary attribute from another base does not satisfy the protocol's `ClassVar`
+requirement either.
 
-def check(regular: ImplicitRegular, declared: ExplicitClassVar, initialized: Initialized) -> None:
-    value: HasValue = regular  # error: [invalid-assignment]
-    value = declared
-    value = initialized
+```py
+class Regular:
+    value: int = 1
+
+class Combined(Regular, HasValue): ...  # error: [invalid-attribute-override]
 ```
 
 ## Declared instance attribute members
