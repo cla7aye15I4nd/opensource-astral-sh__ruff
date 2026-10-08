@@ -15,7 +15,6 @@ use crate::{
         attribute_write::{DescriptorSetterDomain, descriptor_setter_domain},
         class::CodeGeneratorKind,
         context::InferContext,
-        enums::is_enum_class_by_inheritance,
         diagnostic::{
             INVALID_ATTRIBUTE_OVERRIDE, INVALID_MUTABLE_OVERRIDE, INVALID_PROPERTY_TYPE_OVERRIDE,
         },
@@ -71,9 +70,8 @@ fn attribute_contract<'db>(
         return None;
     }
     let (literal, _) = owner.static_class_literal(db)?;
-    // Slots describe this class's contribution to instance layout. Enum value annotations
-    // describe member construction, which has its own validation.
-    if name == "__slots__" || name == "_value_" && is_enum_class_by_inheritance(db, env, literal) {
+    // Slots describe this class's contribution to instance layout.
+    if name == "__slots__" {
         return None;
     }
     // NamedTuple fields have a dedicated override rule, including synthesized properties.
