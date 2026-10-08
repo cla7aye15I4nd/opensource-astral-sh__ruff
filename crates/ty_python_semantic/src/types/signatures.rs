@@ -2096,7 +2096,7 @@ impl<'db> Signature<'db> {
                 db,
                 env,
                 constraints,
-                ConstraintProvenance::Evidence,
+                ConstraintProvenance::INFERRED,
                 self_bound_typevar,
                 upper,
             );

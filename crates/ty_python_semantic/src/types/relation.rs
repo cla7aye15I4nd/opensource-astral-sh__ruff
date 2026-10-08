@@ -337,7 +337,7 @@ impl<'db> Type<'db> {
             TypeVarSet::None,
             TypeRelation::Subtyping,
             TypeVarEvaluation::Lazy,
-            ConstraintProvenance::Evidence,
+            ConstraintProvenance::INFERRED,
         )
     }
 
@@ -406,7 +406,7 @@ impl<'db> Type<'db> {
             relation,
             typevar_evaluation: TypeVarEvaluation::Eager,
             context_tree: Some(ErrorContextTree::new(relation)),
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             relation_visitor: &HasRelationToVisitor::default(&builder),
             disjointness_visitor: &IsDisjointVisitor::default(&builder),
@@ -451,7 +451,7 @@ impl<'db> Type<'db> {
                     TypeVarSet::None,
                     TypeRelation::Subtyping,
                     TypeVarEvaluation::Lazy,
-                    ConstraintProvenance::Evidence,
+                    ConstraintProvenance::INFERRED,
                 )
                 .is_always_satisfied(db, &env, TypeVarSet::None)
         }
@@ -589,7 +589,7 @@ impl<'db> Type<'db> {
                     TypeVarSet::None,
                     TypeRelation::Assignability,
                     TypeVarEvaluation::Lazy,
-                    ConstraintProvenance::Evidence,
+                    ConstraintProvenance::INFERRED,
                 )
             })
         }
@@ -617,7 +617,7 @@ impl<'db> Type<'db> {
             env,
             target,
             constraints,
-            ConstraintProvenance::Evidence,
+            ConstraintProvenance::INFERRED,
         )
     }
 
@@ -719,7 +719,7 @@ impl<'db> Type<'db> {
             inferable,
             relation,
             TypeVarEvaluation::Eager,
-            ConstraintProvenance::Evidence,
+            ConstraintProvenance::INFERRED,
         )
     }
 
@@ -880,7 +880,7 @@ impl<'db> Type<'db> {
         let checker = EquivalenceChecker {
             env: materialization_visitor.env,
             constraints,
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             typevar_evaluation,
             relation_visitor: &relation_visitor,
@@ -934,7 +934,7 @@ impl<'db> Type<'db> {
             constraints,
             inferable,
             context_tree: None,
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             disjointness_visitor: &disjointness_visitor,
             relation_visitor: &relation_visitor,
@@ -958,7 +958,7 @@ impl<'db> Type<'db> {
             constraints: &constraints,
             inferable: TypeVarSet::None,
             context_tree: Some(context.clone()),
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             relation_visitor: &HasRelationToVisitor::default(&constraints),
             disjointness_visitor: &IsDisjointVisitor::default(&constraints),
@@ -989,7 +989,7 @@ impl<'db> Type<'db> {
             constraints,
             inferable,
             context_tree: None,
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: false,
             disjointness_visitor: &disjointness_visitor,
             relation_visitor: &relation_visitor,
@@ -1095,7 +1095,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation,
             typevar_evaluation: TypeVarEvaluation::Eager,
             context_tree: None,
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             relation_visitor,
             disjointness_visitor,
@@ -1163,7 +1163,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation: TypeRelation::Assignability,
             typevar_evaluation: TypeVarEvaluation::Lazy,
             context_tree: Some(ErrorContextTree::new(TypeRelation::Assignability)),
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             relation_visitor,
             disjointness_visitor,
@@ -1187,7 +1187,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             relation: TypeRelation::Assignability,
             typevar_evaluation: TypeVarEvaluation::Eager,
             context_tree: Some(ErrorContextTree::new(TypeRelation::Assignability)),
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             relation_visitor,
             disjointness_visitor,
@@ -3168,7 +3168,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             constraints,
             inferable,
             context_tree: None,
-            provenance: ConstraintProvenance::Evidence,
+            provenance: ConstraintProvenance::INFERRED,
             perform_expensive_checks: true,
             disjointness_visitor,
             relation_visitor,

@@ -44,7 +44,7 @@ fn exact<'db, 'c>(
         db,
         &db.program_environment(),
         builder,
-        ConstraintProvenance::Evidence,
+        ConstraintProvenance::INFERRED,
         typevar,
         ty,
     )
@@ -178,7 +178,7 @@ fn invalid_paths_respect_projection_budgets() {
             db,
             &env,
             &builder,
-            ConstraintProvenance::Evidence,
+            ConstraintProvenance::INFERRED,
             t,
             ty,
         )
@@ -252,7 +252,7 @@ fn alternative_constraint_failures_keep_upper_bounds_on_separate_paths() {
             db,
             &env,
             &builder,
-            ConstraintProvenance::Evidence,
+            ConstraintProvenance::INFERRED,
             t,
             ty,
         )

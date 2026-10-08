@@ -210,6 +210,38 @@ def make_item_with_error(name: str) -> Item:
     )
 ```
 
+## Type context from target type
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+The type parameter of `cast` does not provide type context to its value argument, which could
+incorrectly make the cast appear redundant:
+
+```py
+from typing import Any, cast
+
+def identity[T](value: T) -> T:
+    return value
+
+# revealed: list[int]
+for x in cast(list[object], reveal_type([42])):
+    reveal_type(x)  # revealed: object
+
+def _(value: int):
+    cast(Any, identity(value))
+```
+
+An explicit outer annotation, however, can influence the type of the generic call, leading to the
+cast being redundant:
+
+```py
+def _(value: int):
+    result: Any = cast(Any, identity(value))  # error: [redundant-cast]
+```
+
 ## Redundant casts of tuple classes with unknown elements
 
 A tuple class with an `Unknown` element is not fully static, even when its other element is `object`

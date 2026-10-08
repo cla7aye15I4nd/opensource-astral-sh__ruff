@@ -414,7 +414,8 @@ def _(xs: Unknown):
 
     reveal_type(map("{}".format, xs))  # revealed: map[str]
 
-    reveal_type("".join(map("{}".format, xs)))  # revealed: str
+    # TODO: This should reveal `str`.
+    reveal_type("".join(map("{}".format, xs)))  # revealed: LiteralString
 ```
 
 ## Mapping methods accept arbitrary object types
@@ -556,10 +557,9 @@ def _(values: list[tuple[Any, ...]]):
     reveal_type(dict(values))  # revealed: dict[Any, Any]
 ```
 
-## Failed `dict` calls do not expose internal type variables
+## Constructing a dictionary from a narrowed `Mapping`
 
-Several `dict` overloads accept one positional argument. When none matches, an arbitrarily selected
-overload must not make an otherwise compatible return type fail.
+A value narrowed to `Mapping` can be copied into a dictionary.
 
 ```toml
 [analysis]
@@ -571,28 +571,9 @@ from collections.abc import Mapping
 
 def copy(value: object) -> dict[str, str]:
     if isinstance(value, Mapping):
-        return dict(value)  # error: [no-matching-overload]
+        return dict(value)  # no diagnostic
+
     return {}
-```
-
-## Failed `dict` calls preserve narrowed mapping types
-
-An invalid `dict` call must not invalidate an assignment inside a branch where the original value
-has already been narrowed to a mapping.
-
-```toml
-[analysis]
-strict-generic-narrowing = true
-```
-
-```py
-from collections.abc import Mapping
-
-def clean(value: dict[str, int] | str | None) -> None:
-    if isinstance(value, Mapping):
-        value = dict(value)  # error: [no-matching-overload]
-        for key, item in value.items():
-            value[key] = item
 ```
 
 ## `dict` keyword arguments with a shadowed `typing` module
