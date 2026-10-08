@@ -18,7 +18,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     Db, ProgramEnvironment, attribute_declarations,
     lint::LintId,
-    place::{DefinedPlace, Place, PlaceAndQualifiers, TypeOrigin},
+    place::{
+        DefinedPlace, Place, PlaceAndQualifiers, TypeOrigin, place_from_bindings,
+        place_from_declarations,
+    },
+    reachability::binding_reachability,
     types::{
         CallableType, ClassBase, ClassLiteral, ClassType, IntersectionType, KnownClass,
         MemberLookupPolicy, Parameter, Parameters, Signature, StaticClassLiteral, Type,
@@ -1497,8 +1501,10 @@ fn is_function_definition<'db>(
     scope: ScopeId<'db>,
     symbol: ScopedSymbolId,
 ) -> bool {
-    use_def_map(db, scope)
+    let use_def = use_def_map(db, scope);
+    use_def
         .end_of_scope_symbol_bindings(symbol)
+        .filter(|binding| binding_reachability(db, use_def, binding).may_be_true())
         .filter_map(|binding| binding.binding.definition())
         .any(|definition| definition.kind(db).is_function_def())
 }
@@ -1512,6 +1518,10 @@ fn variable_kind<'db>(
     class_member: PlaceAndQualifiers<'db>,
     instance_member: PlaceAndQualifiers<'db>,
 ) -> Option<VariableKind> {
+    // Syntactic definitions in inactive branches do not establish a storage contract.
+    if class_member.place.is_undefined() && instance_member.place.is_undefined() {
+        return None;
+    }
     if class_member.is_class_var() || instance_member.is_class_var() {
         return Some(VariableKind::Class);
     }
@@ -1587,21 +1597,24 @@ fn variable_kind<'db>(
     )
 }
 
-/// Returns the definition to use as the secondary annotation for an overridden symbol.
+/// Returns the first reachable declaration or binding for an overridden symbol.
 fn symbol_definition<'db>(
     db: &'db dyn Db,
     scope: ScopeId<'db>,
     symbol: ScopedSymbolId,
 ) -> Option<Definition<'db>> {
     let use_def_map = use_def_map(db, scope);
-    use_def_map
-        .end_of_scope_symbol_declarations(symbol)
-        .find_map(|declaration| declaration.declaration.definition())
-        .or_else(|| {
-            use_def_map
-                .end_of_scope_symbol_bindings(symbol)
-                .find_map(|binding| binding.binding.definition())
-        })
+    let env = ProgramEnvironment::from_scope(scope);
+    place_from_declarations(
+        db,
+        &env,
+        use_def_map.end_of_scope_symbol_declarations(symbol),
+    )
+    .first_declaration
+    .or_else(|| {
+        place_from_bindings(db, &env, use_def_map.end_of_scope_symbol_bindings(symbol))
+            .first_definition
+    })
 }
 
 /// Reports an invalid override between a class variable and an instance variable.

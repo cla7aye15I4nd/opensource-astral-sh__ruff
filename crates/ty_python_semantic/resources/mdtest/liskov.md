@@ -3702,6 +3702,72 @@ class Child(Base):
     value = None
 ```
 
+## Inactive bindings preserve inherited storage contracts
+
+A binding in an inactive branch does not introduce an instance-variable contract. A descendant
+assignment still uses the inherited `ClassVar` declaration.
+
+```py
+from typing import ClassVar
+
+class BaseCompiler:
+    exe_extension: ClassVar[str | None] = None
+
+class UnixCompiler(BaseCompiler):
+    if "linux" == "cygwin":
+        exe_extension = ".exe"
+
+class Compiler(UnixCompiler):
+    exe_extension = ".exe"  # no diagnostic
+```
+
+## Active declarations following inactive methods
+
+Only reachable definitions participate in override checking. An inactive method must not cause the
+checker to skip an active attribute declaration of the same name.
+
+```pyi
+class Sequence:
+    def index(self) -> int: ...
+    def count(self) -> int: ...
+
+class memoryview(Sequence):
+    if (3, 10) >= (3, 14):
+        def index(self) -> int: ...
+        def count(self) -> int: ...
+
+    else:
+        index: None  # error: [invalid-attribute-override]
+        count: None  # error: [invalid-attribute-override]
+
+class Compatible(Sequence):
+    if (3, 14) >= (3, 14):
+        def index(self) -> int: ...  # no diagnostic
+
+    else:
+        index: None
+```
+
+## Inactive methods do not hide instance declarations
+
+An inactive method does not exempt the active instance declaration from storage-compatibility checks
+in subclasses.
+
+```py
+from typing import ClassVar
+
+class Base:
+    if (3, 10) >= (3, 14):
+        def value(self) -> int:
+            return 0
+
+    else:
+        value: int
+
+class Child(Base):
+    value: ClassVar[int] = 0  # error: [invalid-attribute-override]
+```
+
 ## Inherited storage conflicts
 
 A class variable selected by the MRO cannot satisfy a base contract that permits instance writes.
