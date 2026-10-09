@@ -923,6 +923,41 @@ class DC7(DC6):
     y: int
 ```
 
+### Class variables replacing frozen fields
+
+A frozen field is already read-only on instances. Replacing it with a `ClassVar` removes no
+permitted write, whether the replacement is declared in the subclass or supplied by another base.
+
+```py
+from dataclasses import dataclass
+from typing import ClassVar
+
+@dataclass(frozen=True)
+class Frozen:
+    value: int
+
+class Direct(Frozen):
+    value: ClassVar[int] = 1  # no diagnostic
+
+class SuppliesValue:
+    value: ClassVar[int] = 1
+
+class Inherited(SuppliesValue, Frozen): ...  # no diagnostic
+```
+
+The readable type must still be compatible in both forms.
+
+```py
+class Incompatible(Frozen):
+    # error: [invalid-attribute-override] "Type `str` is not assignable to inherited type `int`"
+    value: ClassVar[str] = ""
+
+class SuppliesString:
+    value: ClassVar[str] = ""
+
+class InheritedIncompatible(SuppliesString, Frozen): ...  # error: [invalid-attribute-override]
+```
+
 ### Protocol implementations
 
 Regular class-body assignments can implement protocol instance attributes. The `ClassVar` case below

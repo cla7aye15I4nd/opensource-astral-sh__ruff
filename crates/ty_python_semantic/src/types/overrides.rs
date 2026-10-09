@@ -758,12 +758,10 @@ fn check_class_declaration<'db>(
     let mut overridden_final_method = None;
     let mut overridden_final_variable: Option<(ClassType<'db>, Option<Definition<'db>>)> = None;
     let is_private_member = is_mangled_private(member.name.as_str());
-    let mut subclass_variable_kind: Option<Option<VariableKind>> = None;
 
     // Track the first superclass that defines this member so we can distinguish inherited
     // conflicts from violations introduced by the child.
     let mut inherited_member_owner = None;
-    let mut immediate_parent_variable_kind: Option<(ClassType<'db>, VariableKind)> = None;
 
     if !is_private_member {
         for &class_base in bases {
@@ -940,56 +938,6 @@ fn check_class_declaration<'db>(
 
             if !configuration.check_liskov_violations() {
                 continue;
-            }
-
-            if configuration.check_attribute_liskov_violations() && is_attribute_contract_definition
-            {
-                if let Some(superclass_variable_kind) =
-                    effective_superclass_variable_kind(db, superclass, member.name.clone())
-                {
-                    if immediate_parent_variable_kind.is_none() {
-                        immediate_parent_variable_kind =
-                            Some((superclass, superclass_variable_kind));
-                    }
-
-                    let subclass_kind = *subclass_variable_kind.get_or_insert_with(|| {
-                        variable_kind(
-                            db,
-                            env,
-                            class,
-                            &member.name,
-                            class.own_class_member(db, env, None, &member.name).inner,
-                            subclass_instance_member,
-                        )
-                    });
-
-                    if let Some(subclass_kind) = subclass_kind
-                        && !subclass_kind.can_override(superclass_variable_kind)
-                    {
-                        if let Some((immediate_parent, immediate_parent_kind)) =
-                            immediate_parent_variable_kind
-                            && immediate_parent != superclass
-                            && immediate_parent.is_subclass_of(db, env, superclass)
-                            && !immediate_parent_kind.can_override(superclass_variable_kind)
-                        {
-                            continue;
-                        }
-
-                        let superclass_definition = superclass_symbol
-                            .and_then(|(scope, id)| symbol_definition(db, scope, id));
-                        report_invalid_attribute_override(
-                            context,
-                            &member.name,
-                            *first_reachable_definition,
-                            superclass,
-                            superclass_definition,
-                            subclass_kind,
-                            superclass_variable_kind,
-                        );
-                        liskov_diagnostic_emitted = true;
-                        continue;
-                    }
-                }
             }
 
             if configuration.check_attribute_type_violations()
@@ -1585,10 +1533,6 @@ fn variable_kind<'db>(
             || owner
                 .static_class_literal(db)
                 .is_some_and(|(literal, _)| literal.is_own_dataclass_instance_field(db, name))
-            || class_member
-                .place
-                .ignore_possibly_undefined()
-                .is_some_and(|ty| ty.as_property_instance().is_some())
         {
             VariableKind::Instance
         } else {
@@ -1615,51 +1559,6 @@ fn symbol_definition<'db>(
         place_from_bindings(db, &env, use_def_map.end_of_scope_symbol_bindings(symbol))
             .first_definition
     })
-}
-
-/// Reports an invalid override between a class variable and an instance variable.
-fn report_invalid_attribute_override<'db>(
-    context: &InferContext<'db, '_>,
-    member: &Name,
-    subclass_definition: Definition<'db>,
-    superclass: ClassType<'db>,
-    superclass_definition: Option<Definition<'db>>,
-    subclass_kind: VariableKind,
-    superclass_kind: VariableKind,
-) {
-    let db = context.db();
-
-    let Some(builder) = context.report_lint(
-        &INVALID_ATTRIBUTE_OVERRIDE,
-        subclass_definition.focus_range(db, context.module()),
-    ) else {
-        return;
-    };
-
-    let superclass_name = superclass.name(db);
-    let superclass_member = format!("{superclass_name}.{member}");
-    let subclass_kind = subclass_kind.description();
-    let superclass_kind = superclass_kind.description();
-
-    let mut diagnostic =
-        builder.into_diagnostic(format_args!("Invalid override of attribute `{member}`"));
-    diagnostic.set_primary_annotation_message(format_args!(
-        "{subclass_kind} cannot override {superclass_kind} `{superclass_member}`"
-    ));
-    diagnostic.info("This violates the Liskov Substitution Principle");
-
-    if let Some(superclass_definition) = superclass_definition
-        && superclass_definition.file(db) == context.file()
-    {
-        diagnostic.annotate(
-            Annotation::secondary(
-                context.span(superclass_definition.focus_range(db, context.module())),
-            )
-            .message(format_args!(
-                "{superclass_kind} `{superclass_member}` declared here"
-            )),
-        );
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1750,10 +1649,6 @@ impl OverrideRulesConfig {
 
     const fn check_method_liskov_violations(self) -> bool {
         self.contains(OverrideRulesConfig::LISKOV_METHODS)
-    }
-
-    const fn check_attribute_liskov_violations(self) -> bool {
-        self.contains(OverrideRulesConfig::LISKOV_ATTRIBUTES)
     }
 
     const fn check_attribute_type_violations(self) -> bool {
