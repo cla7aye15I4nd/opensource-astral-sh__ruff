@@ -2388,6 +2388,8 @@ impl<'db> ClassType<'db> {
         receiver: Type<'db>,
     ) -> CallableTypes<'db> {
         let env = &ProgramEnvironment::from_file(self.class_literal(db).program_file(db));
+        // This cached constructor query must not depend on an enclosing proof's assumptions.
+        let constraints = ConstraintSetBuilder::new();
         // TODO: This mimics a lot of the logic in Type::try_call_from_constructor. Can we
         // consolidate the two? Can we invoke a class by upcasting the class into a Callable, and
         // then relying on the call binding machinery to Just Work™?
@@ -2451,9 +2453,13 @@ impl<'db> ClassType<'db> {
 
             // Step 3: If the return type of the `__new__` evaluates to a type that is not a subclass of this class,
             // then we should ignore the `__init__` and just return the `__new__` method.
-            let returns_non_subclass = bound_callables
-                .signatures(db)
-                .any(|signature| !signature.return_ty.is_assignable_to(db, env, instance_type));
+            let returns_non_subclass = bound_callables.signatures(db).any(|signature| {
+                signature.has_compatible_receiver(db, env, constraints.relation_session())
+                    && signature
+                        .return_ty
+                        .when_assignable_to(db, env, instance_type, &constraints, TypeVarSet::None)
+                        .is_never_satisfied(db, env, TypeVarSet::None)
+            });
 
             if returns_non_subclass {
                 return bound_callables;

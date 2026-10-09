@@ -16,7 +16,7 @@ use crate::types::call::CallArguments;
 use crate::types::overrides::{VariableKind, effective_superclass_variable_kind};
 use crate::types::projection::{CallableSelfBinding, ObservationEdge};
 use crate::types::recursive::RecursiveOperation;
-use crate::types::relation::{DisjointnessChecker, TypeRelationChecker};
+use crate::types::relation::{DisjointnessChecker, TypeRelation, TypeRelationChecker};
 use crate::types::visitor::any_over_type_expanding_aliases;
 use crate::types::{TypeContext, TypeNormalization, UpcastPolicy};
 use crate::{
@@ -3776,7 +3776,10 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             else {
                 return self.never();
             };
-            let Some(method_signatures) = callable_disjointness_signatures(db, method) else {
+            let receiver_checker = self.as_relation_checker(TypeRelation::Assignability);
+            let Some(method_signatures) =
+                callable_disjointness_signatures(db, &receiver_checker, method)
+            else {
                 return self.never();
             };
 
@@ -3787,7 +3790,8 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             };
 
             callables.iter().when_all(db, self.constraints, |callable| {
-                let Some(callable_signatures) = callable_disjointness_signatures(db, *callable)
+                let Some(callable_signatures) =
+                    callable_disjointness_signatures(db, &receiver_checker, *callable)
                 else {
                     return self.never();
                 };
@@ -3960,8 +3964,9 @@ impl<'db> ProtocolMemberCandidate<'db> {
                     for parameter in signature.parameters().iter().skip(skip_receiver) {
                         visitor.visit_type(db, parameter.annotated_type());
                     }
-                    for ty in signature.receiver_constraint_types() {
-                        visitor.visit_type(db, ty);
+                    for (receiver, annotation) in signature.receiver_relations() {
+                        visitor.visit_type(db, receiver);
+                        visitor.visit_type(db, annotation);
                     }
                     visitor.visit_type(db, signature.return_ty);
                 }
@@ -4230,19 +4235,26 @@ fn protocol_apply_self_with_receiver<'db>(
 ///
 /// Return-type disjointness is a pragmatic approximation for method members: a callable returning
 /// `Never` could satisfy otherwise-incompatible signatures, so it must not establish disjointness.
+/// An impossible receiver removes an overload; uncertain applicability cannot prove disjointness.
 fn callable_disjointness_signatures<'db>(
     db: &'db dyn Db,
+    checker: &TypeRelationChecker<'_, '_, 'db>,
     callable: CallableType<'db>,
 ) -> Option<SmallVec<[(usize, &'db Signature<'db>); 1]>> {
-    let signatures = callable.signatures(db);
-    if signatures.overloads.is_empty()
-        || signatures
-            .iter()
-            .any(|signature| signature.return_ty.resolve_type_alias(db).is_never())
-    {
-        return None;
+    let mut available = SmallVec::new();
+    for (index, signature) in callable.signatures(db).iter().enumerate() {
+        let receiver = signature.receiver_constraints_when_satisfied(db, checker);
+        if receiver.is_never_satisfied(db, checker.env, checker.inferable) {
+            continue;
+        }
+        if !receiver.is_always_satisfied(db, checker.env, checker.inferable)
+            || signature.return_ty.resolve_type_alias(db).is_never()
+        {
+            return None;
+        }
+        available.push((index, signature));
     }
-    Some(signatures.iter().enumerate().collect())
+    (!available.is_empty()).then_some(available)
 }
 
 /// Protocol compatibility can only succeed if every required member is present.

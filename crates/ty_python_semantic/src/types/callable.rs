@@ -1,6 +1,7 @@
 use crate::ProgramEnvironment;
 use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec_inline};
+use std::rc::Rc;
 
 use crate::{
     Db, FxOrderSet,
@@ -14,7 +15,7 @@ use crate::{
         cyclic::ActiveRecursionDetector,
         function::OverloadLiteral,
         known_instance::{FunctoolsPartialInstance, MethodWrapperKind},
-        relation::{TypeRelation, TypeRelationChecker},
+        relation::{RelationSession, TypeRelation, TypeRelationChecker},
         signatures::{CallableSignature, PartialSignatureApplication},
         visitor, walk_signature,
     },
@@ -905,7 +906,7 @@ impl<'db> CallableType<'db> {
         ))
     }
 
-    /// Binds a method receiver, specializing its signatures and removing incompatible overloads.
+    /// Binds a method receiver without solving its compatibility obligations.
     ///
     /// `typing_self_type` is used to replace `typing.Self`, which differs from `receiver_type`
     /// for class methods.
@@ -916,10 +917,47 @@ impl<'db> CallableType<'db> {
         receiver_type: Type<'db>,
         typing_self_type: Type<'db>,
     ) -> CallableType<'db> {
+        Self::new_internal(
+            db,
+            self.signatures(db).bind_self_with_receiver(
+                db,
+                env,
+                Some(receiver_type),
+                Some(typing_self_type),
+            ),
+            CallableTypeKind::Regular,
+            self.deprecated(db),
+        )
+    }
+
+    /// Resolves captured receivers when exposing a concrete callable signature.
+    pub(super) fn specialize_captured_receivers(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        session: &Rc<RelationSession<'db>>,
+    ) -> Self {
+        Self::new_internal(
+            db,
+            self.signatures(db)
+                .specialize_captured_receivers(db, env, session),
+            self.kind(db),
+            self.deprecated(db),
+        )
+    }
+
+    /// Specializes the bound receiver for the user-visible method signature.
+    pub(super) fn bind_self_for_display(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        receiver_type: Type<'db>,
+        typing_self_type: Type<'db>,
+    ) -> CallableType<'db> {
         let constraints = ConstraintSetBuilder::new();
         Self::new_internal(
             db,
-            self.signatures(db).bind_method_receiver(
+            self.signatures(db).bind_method_receiver_for_display(
                 db,
                 env,
                 receiver_type,
