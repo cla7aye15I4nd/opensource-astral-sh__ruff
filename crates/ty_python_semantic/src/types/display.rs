@@ -983,6 +983,7 @@ impl<'db> TypeAliasType<'db> {
             settings,
         }
     }
+
     /// Observe a completed transformation for display without changing its stored application.
     fn display_view(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
         let Some(input) = self.display_operation_input(db) else {

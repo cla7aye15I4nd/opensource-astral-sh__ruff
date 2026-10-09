@@ -20,12 +20,12 @@ use crate::types::constraints::{
 };
 use crate::types::cyclic::{ActiveRecursionDetector, CycleDetector, HasIdentity, TypeIdentity};
 use crate::types::infer::original_class_type;
+use crate::types::projection::ObservationEdge;
 use crate::types::relation::{
-    DisjointnessChecker, HasRelationToVisitor, IsDisjointVisitor, TypeRelation,
-    TypeRelationChecker, TypeVarEvaluation,
+    DisjointnessChecker, TypeRelation, TypeRelationChecker, TypeVarEvaluation,
 };
 use crate::types::set_theoretic::TypeNormalization;
-use crate::types::signatures::{Parameters, ReturnCallableTypeVarScope, SignatureRelationVisitor};
+use crate::types::signatures::{Parameters, ReturnCallableTypeVarScope};
 use crate::types::tuple::{
     TupleSpec, TupleSpecBuilder, TupleType, VariableSegment, walk_tuple_type,
 };
@@ -1687,19 +1687,9 @@ impl<'db> Specialization<'db> {
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
-        let signature_relation_visitor = SignatureRelationVisitor::default();
         let materialization_visitor = ApplyTypeMappingVisitor::new(env);
-        let checker = DisjointnessChecker::new(
-            env,
-            constraints,
-            inferable,
-            &relation_visitor,
-            &disjointness_visitor,
-            &signature_relation_visitor,
-            &materialization_visitor,
-        );
+        let checker =
+            DisjointnessChecker::new(env, constraints, inferable, &materialization_visitor);
         checker.check_specialization_pair(db, self, other)
     }
 
@@ -1798,11 +1788,18 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             target.types(db)
         );
 
-        types.when_all(
+        types.enumerate().when_all(
             db,
             self.constraints,
-            |(bound_typevar, source_type, target_type)| {
+            |(index, (bound_typevar, source_type, target_type))| {
                 let variance = specialization_variance(db, bound_typevar);
+                let checker = self.with_child_operands_at(
+                    db,
+                    *source_type,
+                    *target_type,
+                    ObservationEdge::GenericArgument(index),
+                    ObservationEdge::GenericArgument(index),
+                );
 
                 // Subtyping/assignability of each type in the specialization depends on the variance
                 // of the corresponding typevar:
@@ -1811,7 +1808,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 //   - invariant: verify that source_type <: target_type AND target_type <: source_type
                 //   - bivariant: skip, can't make subtyping/assignability false
                 match variance {
-                    TypeVarVariance::Invariant => self.check_relation_in_invariant_position(
+                    TypeVarVariance::Invariant => checker.check_relation_in_invariant_position(
                         db,
                         *source_type,
                         source_materialization_kind,
@@ -1840,7 +1837,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                             )
                         };
 
-                        self.check_type_pair(
+                        let checker = if variance.is_covariant() {
+                            checker
+                        } else {
+                            checker.reversed()
+                        };
+                        checker.check_child_pair(
                             db,
                             self.materialize_constrained_type_argument(
                                 db,
@@ -1913,8 +1915,9 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             // A viable constraint must overlap the argument's upper materialization and contain
             // its lower materialization. The upper check matters for `Intersection[int, Any]`,
             // and the lower check matters for `Any | int`.
-            if argument_top.is_disjoint_from(db, env, constraint_top)
-                || !argument_bottom.is_subtype_of(db, env, constraint_top)
+            let session = self.constraints.relation_session();
+            if session.is_disjoint(db, env, argument_top, constraint_top)
+                || !session.is_subtype_eager(db, env, argument_bottom, constraint_top)
             {
                 return None;
             }
@@ -2036,11 +2039,11 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                         )
                     }
                 } else {
-                    self.check_type_pair(db, target_type, source_type).and(
-                        db,
-                        self.constraints,
-                        || self.check_type_pair(db, source_type, target_type),
-                    )
+                    self.reversed()
+                        .check_child_pair(db, target_type, source_type)
+                        .and(db, self.constraints, || {
+                            self.check_child_pair(db, source_type, target_type)
+                        })
                 }
             }
             // For gradual types, A <: B (subtyping) is defined as Top[A] <: Bottom[B]
@@ -2157,19 +2160,23 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             self.materialization_visitor,
         );
 
-        let is_subtype_of = |source, target| self.check_type_pair(db, source, target);
+        let is_subtype_of = |source, target| self.check_child_pair(db, source, target);
+        let is_reverse_subtype_of =
+            |target, source| self.reversed().check_child_pair(db, target, source);
         match (source_materialization, target_materialization) {
             // `source` is a subtype of `target` if the range of materializations covered by `source`
             // is a subset of the range covered by `target`.
             (MaterializationKind::Top, MaterializationKind::Top) => {
-                is_subtype_of(target_bottom, source_bottom).and(db, self.constraints, || {
-                    is_subtype_of(source_top, target_top)
-                })
+                is_reverse_subtype_of(target_bottom, source_bottom).and(
+                    db,
+                    self.constraints,
+                    || is_subtype_of(source_top, target_top),
+                )
             }
             // One bottom is a subtype of another if it covers a strictly larger set of materializations.
             (MaterializationKind::Bottom, MaterializationKind::Bottom) => {
                 is_subtype_of(source_bottom, target_bottom).and(db, self.constraints, || {
-                    is_subtype_of(target_top, source_top)
+                    is_reverse_subtype_of(target_top, source_top)
                 })
             }
             // The ranges overlap when each lower bound is a subtype of the other upper bound.
@@ -2177,14 +2184,14 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             // lower bounds nor the upper bounds need to be comparable to each other.
             (MaterializationKind::Bottom, MaterializationKind::Top) => {
                 is_subtype_of(source_bottom, target_top).and(db, self.constraints, || {
-                    is_subtype_of(target_bottom, source_top)
+                    is_reverse_subtype_of(target_bottom, source_top)
                 })
             }
             // A top materialization is a subtype of a bottom materialization only if both original
             // un-materialized types are the same fully static type.
             (MaterializationKind::Top, MaterializationKind::Bottom) => {
                 is_subtype_of(source_top, target_bottom).and(db, self.constraints, || {
-                    is_subtype_of(target_top, source_bottom)
+                    is_reverse_subtype_of(target_top, source_bottom)
                 })
             }
         }
@@ -2229,10 +2236,10 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             right.types(db)
         );
 
-        types.when_any(
+        types.enumerate().when_any(
             db,
             self.constraints,
-            |(bound_typevar, left_type, right_type)| match bound_typevar.variance(db) {
+            |(index, (bound_typevar, left_type, right_type))| match bound_typevar.variance(db) {
                 TypeVarVariance::Invariant => {
                     // Preserve recursive applications until the relation checker registers
                     // their obligations. Unfolding here loses the constructor and its arguments.
@@ -2253,7 +2260,14 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
                         materialize_typevar_bounds_and_defaults: false,
                         ..ApplyTypeMappingVisitor::new(self.env)
                     };
-                    let mut checker = self.as_relation_checker(TypeRelation::Subtyping);
+                    let child_checker = self.with_child_operands_at(
+                        db,
+                        left_type,
+                        right_type,
+                        ObservationEdge::GenericArgument(index),
+                        ObservationEdge::GenericArgument(index),
+                    );
+                    let mut checker = child_checker.as_relation_checker(TypeRelation::Subtyping);
                     checker.typevar_evaluation = TypeVarEvaluation::Lazy;
                     checker.materialization_visitor = &materialization_visitor;
                     let result = self
@@ -2265,10 +2279,7 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
                                 right_type,
                                 MaterializationKind::Top,
                             );
-                            ConstraintSet::from_bool(
-                                self.constraints,
-                                !overlap.has_no_valid_solutions(db, self.env),
-                            )
+                            overlap.when_has_valid_solutions(db, self.env)
                         })
                         .negate(db, self.constraints);
                     if let Some(context) = self.report_context()
@@ -2682,11 +2693,12 @@ pub(crate) enum TypeVarInferenceFallback {
     Unconstrained,
     Variadic,
     Unsatisfiable,
+    Incomplete,
     BudgetExceeded,
 }
 
 /// An owned projection before allocating a cached inference result. Correlated callers retain
-/// `SolutionPaths`; merged-only callers use `()` and never allocate an alternative family.
+/// `SolutionPaths`; merged-only callers use `()` after combining the bounded path family.
 struct PendingInference<'db, T> {
     merged_types: FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>>,
     solutions: Result<T, TypeVarInferenceFallback>,
@@ -2835,7 +2847,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         };
         let inference = self
             .solve_pending_projection(&mut choose_solution, |builder, choose| {
-                builder.pending.try_fold_solutions(
+                let solutions = builder.pending.inference_solutions_with(
                     db,
                     builder.env,
                     builder.inferable,
@@ -2858,18 +2870,29 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                             outcome => outcome,
                         }
                     },
-                    PendingInference {
-                        merged_types: FxHashMap::default(),
-                        solutions: Ok(()),
-                    },
-                    |mut inference, solution, budget| {
-                        for binding in solution {
-                            budget.charge_type(db, binding.solution)?;
-                        }
-                        builder.merge_solution(&mut inference.merged_types, solution);
-                        Ok(inference)
-                    },
-                )
+                )?;
+                let solutions = match solutions {
+                    Solutions::Unsatisfiable(_) => return Ok(SolutionProjection::Unsatisfiable),
+                    Solutions::Unconstrained => return Ok(SolutionProjection::Unconstrained),
+                    Solutions::Constrained(solutions) => solutions,
+                };
+                let mut merged_types = FxHashMap::default();
+                for solution in solutions.as_slice() {
+                    builder.merge_solution(&mut merged_types, &solution.solved_typevars);
+                }
+                // An unresolved proof does not erase the bounds contributed by the actual
+                // expressions. Retain those types for inference while preserving their status.
+                let completeness = match solutions {
+                    SolutionPaths::Complete(_) => Ok(()),
+                    SolutionPaths::Incomplete(_) => Err(TypeVarInferenceFallback::Incomplete),
+                    SolutionPaths::BudgetExceeded(_) => {
+                        Err(TypeVarInferenceFallback::BudgetExceeded)
+                    }
+                };
+                Ok(SolutionProjection::Constrained(PendingInference {
+                    merged_types,
+                    solutions: completeness,
+                }))
             })
             .unwrap_or_else(|()| {
                 self.compatibility_inference_with(
@@ -2989,7 +3012,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         let db = self.db;
         let mut specialization_errors = Vec::new();
         let inference = self.solve_pending_projection(choose, |builder, choose| {
-            let solutions = builder.pending.solutions_with(
+            let solutions = builder.pending.inference_solutions_with(
                 db,
                 builder.env,
                 builder.inferable,
@@ -3070,7 +3093,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         }
     }
 
-    /// Shares recovery and normalization between streaming merged projection and correlated
+    /// Shares recovery and normalization between merged projection and correlated
     /// solution collection. The projection decides which solved evidence it needs to retain.
     fn solve_pending_projection<T, Choose>(
         &mut self,
@@ -3574,7 +3597,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     /// Solves one relation without recording it or changing the legacy type mappings.
     fn analyze_constraint_set(&self, set: ConstraintSet<'db, 'c>) -> ConstraintSetAnalysis<'db> {
         let db = self.db;
-        let solutions = set.solutions_with(
+        let solutions = set.inference_solutions_with(
             db,
             self.env,
             self.inferable,
@@ -3698,11 +3721,26 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         relation_directions(formal, actual, polarity).when_all(
             db,
             self.constraints,
-            |(source, target)| {
-                let when = source.when_constraint_set_assignable_to_owned(db, self.env, target);
-                self.constraints.load(db, self.env, &when)
-            },
+            |(source, target)| self.assignability_constraint(source, target),
         )
+    }
+
+    /// Reuses the caller's proof when inference compares another pair of types.
+    /// Only independent comparisons can use the cached, closed assignability query.
+    fn assignability_constraint(
+        &self,
+        source: Type<'db>,
+        target: Type<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        let when = self.constraints.relation_session().when_assignable(
+            self.db,
+            self.env,
+            source,
+            target,
+            TypeVarSet::None,
+            TypeVarEvaluation::Lazy,
+        );
+        self.constraints.load(self.db, self.env, &when)
     }
 
     /// Returns common protocol constraints for the `TypedDict` members of a union when every such
@@ -3869,18 +3907,13 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         // when a `TypedDict` preserves more precise correlations between its keys and values.
         let spec = &[KnownClass::Str.to_instance(db, env), Type::object()];
         let mapping = KnownClass::Mapping.to_specialized_instance(db, env, spec);
-        let mapping_when = mapping.when_constraint_set_assignable_to_owned(db, env, formal);
-        let mapping_when = self.constraints.load(db, env, &mapping_when);
+        let mapping_when = self.assignability_constraint(mapping, formal);
         // Logically equivalent constraints can still infer different solutions, such as `Any`
         // instead of `object`; preserve the original constraints when gradual evidence differs
         // or either solution collection exceeds its budget.
         let mapping_solutions = mapping_when.solutions(db, env, self.inferable).ok()?;
         if !typed_dicts.into_iter().all(|element| {
-            let element_when = self.constraints.load(
-                db,
-                env,
-                &element.when_constraint_set_assignable_to_owned(db, env, formal),
-            );
+            let element_when = self.assignability_constraint(element, formal);
             element_when
                 .iff(db, self.constraints, mapping_when)
                 .is_always_satisfied(db, env, self.inferable)
@@ -3897,11 +3930,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             other_types
                 .into_iter()
                 .when_all(db, self.constraints, |element| {
-                    self.constraints.load(
-                        db,
-                        env,
-                        &element.when_constraint_set_assignable_to_owned(db, env, formal),
-                    )
+                    self.assignability_constraint(element, formal)
                 })
         }))
     }
@@ -4053,11 +4082,25 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         //
         // If no elements survive, keep the original union: inferring from `Never` would discard
         // its type variables and skip the bound checks that reject the argument.
+        let disjoint_constraints = self.constraints.child();
+        let filter_mapping = TypeMapping::ApplySpecialization(ApplySpecialization::specialization(
+            self.generic_context.unknown_specialization(db, None),
+        ));
+        let filter_visitor = ApplyTypeMappingVisitor::new(self.env)
+            .with_normalization(TypeNormalization::Structural);
+        let substitute_for_filter = |ty: Type<'db>| {
+            ty.apply_type_mapping_impl(db, &filter_mapping, TypeContext::default(), &filter_visitor)
+        };
         let actual = if actual.resolve_type_alias(db).is_union() {
-            let formal = formal
-                .apply_specialization(db, self.generic_context.unknown_specialization(db, None));
+            let formal = substitute_for_filter(formal);
             actual
-                .discard_disjoint_union_elements(db, self.env, formal, self.inferable)
+                .discard_disjoint_union_elements(
+                    db,
+                    self.env,
+                    self.constraints,
+                    formal,
+                    self.inferable,
+                )
                 .unless_all_disjoint(actual)
         } else {
             actual
@@ -4066,10 +4109,8 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         // `list[T]` must survive a comparison with `list[object]` even if `T: str`, so that
         // inference can report the bound violation. It can still be discarded when the
         // argument is `str | None`, since no specialization of `list[T]` can match it.
-        let disjoint_constraints = ConstraintSetBuilder::new();
         let formal = formal.filter_union(db, self.env, |element| {
-            !element
-                .apply_specialization(db, self.generic_context.unknown_specialization(db, None))
+            !substitute_for_filter(*element)
                 .when_disjoint_from(db, self.env, actual, &disjoint_constraints, self.inferable)
                 .is_always_satisfied(db, self.env, self.inferable)
         });
@@ -4613,24 +4654,23 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                                 return Some(combined);
                             }
 
-                            let when = if source_origin
+                            let next = if source_origin
                                 .is_subtype_of_class_literal(db, target_origin.class_literal(db))
                                 || target.interface(db).has_only_finite_members(db)
                             {
-                                Type::ProtocolInstance(source)
-                                    .when_constraint_set_assignable_to_owned(
-                                        db,
-                                        self.env,
-                                        Type::ProtocolInstance(target),
-                                    )
+                                self.assignability_constraint(
+                                    Type::ProtocolInstance(source),
+                                    Type::ProtocolInstance(target),
+                                )
                             } else {
-                                Cow::Borrowed(
+                                self.constraints.load(
+                                    db,
+                                    self.env,
                                     source.when_non_recursive_members_assignable_to_owned(
                                         db, target,
                                     )?,
                                 )
                             };
-                            let next = self.constraints.load(db, self.env, &when);
                             Some(combined.intersect(db, self.constraints, next))
                         },
                     );
@@ -5027,6 +5067,26 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn merged_inference_preserves_evidence_from_incomplete_relations() {
+        let db = setup_db();
+        let db = &db;
+        let env = db.program_environment();
+        let [t] = create_typevars(db, ["T"]);
+        let context = GenericContext::from_typevar_instances(db, &env, [t]);
+        let constraints = ConstraintSetBuilder::new();
+        let int = KnownClass::Int.to_instance(db, &env);
+        let pending = ConstraintSet::incomplete(&constraints).and(db, &constraints, || {
+            exact_alternatives(db, &constraints, [t], [[int]])
+        });
+        let mut builder = SpecializationBuilder::new(db, &env, &constraints, context);
+        builder.record_constraint_set(pending);
+
+        let inferred = builder.build_merged_with(|_, _| None);
+        assert_eq!(inferred.types(db), &[int]);
+        assert!(!pending.has_satisfying_specialization(db, &env, context.inferable_typevars(db)));
     }
 
     #[test]

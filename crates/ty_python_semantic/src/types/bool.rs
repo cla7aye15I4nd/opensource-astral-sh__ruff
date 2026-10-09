@@ -279,6 +279,8 @@ impl<'db> Type<'db> {
             Type::KnownInstance(KnownInstanceType::ConstraintSet(tracked_set)) => {
                 let constraints = ConstraintSetBuilder::new();
                 let tracked_set = constraints.load(db, env, tracked_set.constraints(db));
+                // Boolean conversion asks whether the formula is proved universally true.
+                // Logical operations on the formula itself, including `~`, retain uncertainty.
                 Truthiness::from(tracked_set.is_always_satisfied(db, env, TypeVarSet::None))
             }
 

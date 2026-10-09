@@ -304,7 +304,7 @@ impl PathAssignments {
         visitor: &mut V,
     ) -> ControlFlow<V::Break, V::Result>
     where
-        V: PathVisitor,
+        V: PathVisitor<'db>,
     {
         visitor.visit_node()?;
         match node.node() {
@@ -734,6 +734,9 @@ impl PathAssignments {
 
         let constraint_data = storage.constraint_data(constraint);
         if let Some(map) = SequentMap::for_constraint(db, env, constraint_data) {
+            if map.incomplete {
+                storage.relation_session.mark_incomplete();
+            }
             let added = self.add_sequents(db, env, storage, map);
 
             // `projection_source_order` depends on knowing the order that sequents were discovered for
@@ -794,11 +797,20 @@ impl PathAssignments {
                 continue;
             }
 
-            let Some(map) = SequentMap::for_constraint_pair(db, env, a_data, b_data) else {
+            let Some(map) = SequentMap::for_constraint_pair_in_session(
+                db,
+                env,
+                &storage.relation_session,
+                a_data,
+                b_data,
+            ) else {
                 continue;
             };
             self.elaborated_pairs.insert((a, b));
-            let added = self.add_sequents(db, env, storage, map);
+            if map.incomplete {
+                storage.relation_session.mark_incomplete();
+            }
+            let added = self.add_sequents(db, env, storage, &map);
 
             // `projection_source_order` depends on knowing the order that sequents were discovered for
             // each constraint. Since we are salsa-caching sequent derivation, we don't have easy

@@ -11,7 +11,8 @@ use crate::types::constraints::{
     ALWAYS_FALSE, ALWAYS_TRUE, ConstraintSetBuilder, ConstraintSetStorage, Node, NodeId,
     SourceOrderId, max_constructor_and_typevar_depth, wobble_index,
 };
-use crate::types::typevar::{BoundTypeVarInstance, TypeVarDomain};
+use crate::types::relation::TypeVarEvaluation;
+use crate::types::typevar::{BoundTypeVarInstance, TypeVarDomain, TypeVarSet};
 use crate::types::{ApplyTypeMappingVisitor, Type, TypeContext, TypeMapping};
 use crate::{Db, ProgramEnvironment};
 
@@ -517,7 +518,7 @@ impl<'db> Constraint<'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> (NodeId, Option<SourceOrderId>) {
+    ) -> (NodeId, NodeId, Option<SourceOrderId>) {
         match self {
             Constraint::ConcreteLower(this) => {
                 this.apply_type_mapping_impl(db, builder, type_mapping, tcx, visitor)
@@ -631,24 +632,31 @@ impl<'db> ConcreteLowerBound<'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> (NodeId, Option<SourceOrderId>) {
+    ) -> (NodeId, NodeId, Option<SourceOrderId>) {
         let env = visitor.env;
         let subject =
             Type::TypeVar(self.typevar).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
         let bound = self
             .bound
             .apply_type_mapping_impl(db, type_mapping, tcx, visitor);
-        let mut storage = builder.storage.borrow_mut();
         match subject {
             Type::TypeVar(typevar) => {
                 let applied = Constraint::new_lower_bound(db, self.provenance, typevar, bound);
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
-            _ => storage.load(
-                db,
-                env,
-                &bound.when_constraint_set_assignable_to_owned(db, env, subject),
-            ),
+            _ => {
+                let proof = builder.relation_session().when_assignable(
+                    db,
+                    env,
+                    bound,
+                    subject,
+                    TypeVarSet::None,
+                    TypeVarEvaluation::Lazy,
+                );
+                builder.storage.borrow_mut().load_bounds(db, env, &proof)
+            }
         }
     }
 
@@ -749,24 +757,31 @@ impl<'db> ConcreteUpperBound<'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> (NodeId, Option<SourceOrderId>) {
+    ) -> (NodeId, NodeId, Option<SourceOrderId>) {
         let env = visitor.env;
         let subject =
             Type::TypeVar(self.typevar).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
         let bound = self
             .bound
             .apply_type_mapping_impl(db, type_mapping, tcx, visitor);
-        let mut storage = builder.storage.borrow_mut();
         match subject {
             Type::TypeVar(typevar) => {
                 let applied = Constraint::new_upper_bound(db, env, self.provenance, typevar, bound);
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
-            _ => storage.load(
-                db,
-                env,
-                &subject.when_constraint_set_assignable_to_owned(db, env, bound),
-            ),
+            _ => {
+                let proof = builder.relation_session().when_assignable(
+                    db,
+                    env,
+                    subject,
+                    bound,
+                    TypeVarSet::None,
+                    TypeVarEvaluation::Lazy,
+                );
+                builder.storage.borrow_mut().load_bounds(db, env, &proof)
+            }
         }
     }
 
@@ -864,25 +879,27 @@ impl<'db> ConcreteEquivalenceBound<'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> (NodeId, Option<SourceOrderId>) {
+    ) -> (NodeId, NodeId, Option<SourceOrderId>) {
         let env = visitor.env;
         let subject =
             Type::TypeVar(self.typevar).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
         let bound = self
             .bound
             .apply_type_mapping_impl(db, type_mapping, tcx, visitor);
-        let mut storage = builder.storage.borrow_mut();
         match subject {
             Type::TypeVar(typevar) => {
                 let applied =
                     Constraint::new_equivalence_bound(db, env, self.provenance, typevar, bound);
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
-            _ => storage.load(
-                db,
-                env,
-                &subject.when_constraint_set_equivalent_to_owned(db, env, bound),
-            ),
+            _ => {
+                let proof = builder
+                    .relation_session()
+                    .when_equivalent(db, env, subject, bound);
+                builder.storage.borrow_mut().load_bounds(db, env, &proof)
+            }
         }
     }
 
@@ -997,27 +1014,36 @@ impl<'db> TypeVarRangeBound<'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> (NodeId, Option<SourceOrderId>) {
+    ) -> (NodeId, NodeId, Option<SourceOrderId>) {
         let env = visitor.env;
         let left = Type::TypeVar(self.left).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
         let right =
             Type::TypeVar(self.right).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
-        let mut storage = builder.storage.borrow_mut();
         match (left, right) {
             (Type::TypeVar(left_typevar), _) => {
                 let applied =
                     Constraint::new_upper_bound(db, env, self.provenance, left_typevar, right);
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
             (_, Type::TypeVar(right_typevar)) => {
                 let applied = Constraint::new_lower_bound(db, self.provenance, right_typevar, left);
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
-            _ => storage.load(
-                db,
-                env,
-                &left.when_constraint_set_assignable_to_owned(db, env, right),
-            ),
+            _ => {
+                let proof = builder.relation_session().when_assignable(
+                    db,
+                    env,
+                    left,
+                    right,
+                    TypeVarSet::None,
+                    TypeVarEvaluation::Lazy,
+                );
+                builder.storage.borrow_mut().load_bounds(db, env, &proof)
+            }
         }
     }
 
@@ -1144,12 +1170,11 @@ impl<'db> TypeVarEquivalenceBound<'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> (NodeId, Option<SourceOrderId>) {
+    ) -> (NodeId, NodeId, Option<SourceOrderId>) {
         let env = visitor.env;
         let left = Type::TypeVar(self.left).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
         let right =
             Type::TypeVar(self.right).apply_type_mapping_impl(db, type_mapping, tcx, visitor);
-        let mut storage = builder.storage.borrow_mut();
         match (left, right) {
             (Type::TypeVar(left_typevar), _) => {
                 let applied = Constraint::new_equivalence_bound(
@@ -1159,7 +1184,9 @@ impl<'db> TypeVarEquivalenceBound<'db> {
                     left_typevar,
                     right,
                 );
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
             (_, Type::TypeVar(right_typevar)) => {
                 let applied = Constraint::new_equivalence_bound(
@@ -1169,13 +1196,16 @@ impl<'db> TypeVarEquivalenceBound<'db> {
                     right_typevar,
                     left,
                 );
-                Constraint::new_nodes(db, env, &mut storage, applied)
+                let (node, order) =
+                    Constraint::new_nodes(db, env, &mut builder.storage.borrow_mut(), applied);
+                (node, node, order)
             }
-            _ => storage.load(
-                db,
-                env,
-                &left.when_constraint_set_equivalent_to_owned(db, env, right),
-            ),
+            _ => {
+                let proof = builder
+                    .relation_session()
+                    .when_equivalent(db, env, left, right);
+                builder.storage.borrow_mut().load_bounds(db, env, &proof)
+            }
         }
     }
 

@@ -28,10 +28,8 @@ use crate::types::protocol_class::{
 };
 use crate::types::recursive::RecursiveType;
 use crate::types::relation::{
-    DisjointnessChecker, HasRelationToVisitor, IsDisjointVisitor, TypeRelation,
-    TypeRelationChecker, TypeVarEvaluation,
+    DisjointnessChecker, TypeRelation, TypeRelationChecker, TypeVarEvaluation,
 };
-use crate::types::signatures::SignatureRelationVisitor;
 use crate::types::tuple::{TupleSpec, TupleType, walk_tuple_type};
 use crate::types::typevar::{TypeVarBoundOrConstraints, TypeVarSet};
 use crate::types::visitor::{
@@ -919,7 +917,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 && source.interface(db).has_only_methods(db)
                 && protocol_materialization_is_noop(db, self.env.program(db), source_origin)
             {
-                return self.check_type_pair(
+                return self.check_child_pair(
                     db,
                     Type::ProtocolInstance(ProtocolInstanceType::from_class(source_origin)),
                     Type::ProtocolInstance(protocol),
@@ -939,7 +937,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 .unwrap_or(ty);
 
             let nominally_satisfied =
-                self.check_type_pair(db, type_to_test, Type::NominalInstance(nominal_instance));
+                self.check_child_pair(db, type_to_test, Type::NominalInstance(nominal_instance));
 
             // `Generator` parameters must be compared nominally. The class specialization
             // already materializes each parameter according to its variance, while structural
@@ -1054,45 +1052,6 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             });
         }
         result.or(db, self.constraints, || structurally_satisfied)
-    }
-
-    /// Try a nominal proof when a materialized recursive protocol changes specialization.
-    ///
-    /// A recursive child can stabilize at a specialization that relates nominally even when its
-    /// parent only relates structurally. Keep the child's constraints without retrying the
-    /// structural comparison that reached the recursion guard.
-    pub(super) fn try_check_nominal_protocol_cycle(
-        &self,
-        db: &'db dyn Db,
-        source: Type<'db>,
-        target: Type<'db>,
-    ) -> Option<ConstraintSet<'db, 'c>> {
-        let source = source.as_protocol_instance(db)?;
-        let target = target.as_protocol_instance(db)?;
-        if source.materialization_kind(db).is_none() && target.materialization_kind(db).is_none() {
-            return None;
-        }
-        let source_origin = source.class_origin(db)?;
-        let target_origin = target.class_origin(db)?;
-        if source_origin.class_literal(db) != target_origin.class_literal(db) {
-            return None;
-        }
-
-        // Nominal arguments alone do not describe materialized requirements such as a fixed
-        // `Any` member. Only use the nominal proof when the pending wrappers are harmless.
-        for protocol in [source, target] {
-            if let Some(origin) = protocol.materialized_origin(db)
-                && !protocol_materialization_is_noop(db, self.env.program(db), origin)
-            {
-                return None;
-            }
-        }
-
-        Some(self.check_type_pair(
-            db,
-            Type::NominalInstance(source.nominal_origin_instance(db)?),
-            Type::NominalInstance(target.nominal_origin_instance(db)?),
-        ))
     }
 
     /// Avoid recursive requirements that cannot add solutions beyond explicit inheritance.
@@ -1387,7 +1346,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         );
 
         let constructed_ty = meta_ty.instance_type_for_meta_protocol(db, env);
-        self.check_type_pair(db, constructed_ty, Type::ProtocolInstance(protocol))
+        self.check_child_pair(db, constructed_ty, Type::ProtocolInstance(protocol))
             .and(db, self.constraints, || {
                 self.check_meta_protocol_members(db, constructed_ty, meta_ty, protocol)
             })
@@ -1515,16 +1474,10 @@ fn non_recursive_protocol_constraints<'db>(
     let env = ProgramEnvironment::from_program(target.base().program(db));
     let constraints = ConstraintSetBuilder::new();
     constraints.into_owned(|constraints| {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
-        let signature_relation_visitor = SignatureRelationVisitor::default();
         let materialization_visitor = ApplyTypeMappingVisitor::new(&env);
         let checker = TypeRelationChecker::constraint_set_assignability(
             &env,
             constraints,
-            &relation_visitor,
-            &disjointness_visitor,
-            &signature_relation_visitor,
             &materialization_visitor,
         );
         checker.check_protocol_interface_pair(
@@ -2000,17 +1953,11 @@ impl<'db> ProtocolInstanceType<'db> {
 
             let env = ProgramEnvironment::from_program(interface.base().program(db));
             let constraints = ConstraintSetBuilder::new();
-            let relation_visitor = HasRelationToVisitor::default(&constraints);
-            let disjointness_visitor = IsDisjointVisitor::default(&constraints);
-            let signature_relation_visitor = SignatureRelationVisitor::default();
             let materialization_visitor = ApplyTypeMappingVisitor::new(&env);
             let checker = TypeRelationChecker::subtyping(
                 &env,
                 &constraints,
                 TypeVarSet::None,
-                &relation_visitor,
-                &disjointness_visitor,
-                &signature_relation_visitor,
                 &materialization_visitor,
             );
             checker

@@ -10,7 +10,7 @@ use crate::{
         FunctionType, InternedType, KnownBoundMethodType, KnownClass, KnownInstanceType,
         LiteralValueTypeKind, MemberLookupPolicy, Parameter, Parameters, Signature,
         SubclassOfInner, Type, TypeContext, TypeMapping, TypeVarBoundOrConstraints, UnionType,
-        constraints::{ConstraintSet, IteratorConstraintsExtension},
+        constraints::{ConstraintSet, ConstraintSetBuilder, IteratorConstraintsExtension},
         cyclic::ActiveRecursionDetector,
         function::OverloadLiteral,
         known_instance::{FunctoolsPartialInstance, MethodWrapperKind},
@@ -916,10 +916,16 @@ impl<'db> CallableType<'db> {
         receiver_type: Type<'db>,
         typing_self_type: Type<'db>,
     ) -> CallableType<'db> {
+        let constraints = ConstraintSetBuilder::new();
         Self::new_internal(
             db,
-            self.signatures(db)
-                .bind_method_receiver(db, env, receiver_type, typing_self_type),
+            self.signatures(db).bind_method_receiver(
+                db,
+                env,
+                receiver_type,
+                typing_self_type,
+                constraints.relation_session(),
+            ),
             CallableTypeKind::Regular,
             self.deprecated(db),
         )

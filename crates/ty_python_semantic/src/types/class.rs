@@ -38,12 +38,8 @@ use crate::types::infer::infer_definition_types;
 use crate::types::known_instance::DeprecatedInstance;
 use crate::types::member::{Member, inherited_class_body_declaration};
 use crate::types::mro::{Mro, StaticMroError};
-use crate::types::relation::{
-    DisjointnessChecker, HasRelationToVisitor, IsDisjointVisitor, TypeRelation, TypeRelationChecker,
-};
-use crate::types::signatures::{
-    CallableSignature, Parameter, Parameters, Signature, SignatureRelationVisitor,
-};
+use crate::types::relation::{DisjointnessChecker, TypeRelation, TypeRelationChecker};
+use crate::types::signatures::{CallableSignature, Parameter, Parameters, Signature};
 use crate::types::tuple::{Tuple, TupleSpec};
 use crate::types::typevar::TypeVarSet;
 use crate::types::variance::VarianceOrigin;
@@ -1512,18 +1508,12 @@ impl<'db> ClassType<'db> {
         relation: TypeRelation,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
-        let relation_visitor = HasRelationToVisitor::default(&constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(&constraints);
-        let signature_relation_visitor = SignatureRelationVisitor::default();
         let materialization_visitor = ApplyTypeMappingVisitor::new(env);
         let checker = TypeRelationChecker::new(
             env,
             relation,
             &constraints,
             TypeVarSet::None,
-            &relation_visitor,
-            &disjointness_visitor,
-            &signature_relation_visitor,
             &materialization_visitor,
         );
         checker

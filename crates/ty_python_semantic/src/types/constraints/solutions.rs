@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ops::{ControlFlow, Range};
+use std::rc::Rc;
 
 use indexmap::map::Slice;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -15,6 +16,7 @@ use crate::types::constraints::{
     ConstraintSetStorage, Node, NodeId, SolutionLimits, SolutionValidity, SolutionViolation,
     SolutionViolationKind, UnboundedSolutionLimits,
 };
+use crate::types::relation::{RelationSession, TypeVarEvaluation};
 use crate::types::typevar::{TypeVarBoundOrConstraints, TypeVarConstraints, TypeVarSet};
 use crate::types::{BoundTypeVarIdentity, BoundTypeVarInstance, Type, any_over_type};
 use crate::{Db, FxIndexMap, FxIndexSet, ProgramEnvironment};
@@ -691,7 +693,14 @@ impl<'db> SolutionWalker<'db> {
             Some(lower) => storage.load(
                 db,
                 env,
-                &lower.when_assignable_to_owned(db, env, constraint_upper, self.inferable),
+                &storage.relation_session.when_assignable(
+                    db,
+                    env,
+                    lower,
+                    constraint_upper,
+                    self.inferable,
+                    TypeVarEvaluation::Eager,
+                ),
             ),
             None => (ALWAYS_TRUE, None),
         };
@@ -701,7 +710,14 @@ impl<'db> SolutionWalker<'db> {
                 let (when_upper, when_upper_source_order) = storage.load(
                     db,
                     env,
-                    &constraint_lower.when_assignable_to_owned(db, env, upper, self.inferable),
+                    &storage.relation_session.when_assignable(
+                        db,
+                        env,
+                        constraint_lower,
+                        upper,
+                        self.inferable,
+                        TypeVarEvaluation::Eager,
+                    ),
                 );
                 let when = when.and(storage, when_upper);
                 let when_source_order =
@@ -729,11 +745,13 @@ impl<'db> SolutionWalker<'db> {
     ) -> ControlFlow<L::Break, Option<ConstraintFailureEvidence<'db>>> {
         if let Some(lower) = evidence.inference_lower(db, env)
             && constrained.declared_constraints.iter().all(|declared| {
-                let when = lower.when_assignable_to_owned(
+                let when = storage.relation_session.when_assignable(
                     db,
                     env,
+                    lower,
                     declared.constrained_ty.top_materialization(db, env),
                     self.inferable,
+                    TypeVarEvaluation::Eager,
                 );
                 let (when, source_order) = storage.load(db, env, &when);
                 when.is_never_satisfied(db, env, storage, self.inferable, source_order)
@@ -798,10 +816,14 @@ impl<'db> SolutionWalker<'db> {
                         let mut when = ALWAYS_TRUE;
                         let mut source_order = None;
                         for upper in bounds {
-                            let relation = declared
-                                .constrained_ty
-                                .bottom_materialization(db, env)
-                                .when_assignable_to_owned(db, env, *upper, self.inferable);
+                            let relation = storage.relation_session.when_assignable(
+                                db,
+                                env,
+                                declared.constrained_ty.bottom_materialization(db, env),
+                                *upper,
+                                self.inferable,
+                                TypeVarEvaluation::Eager,
+                            );
                             let (next, next_order) = storage.load(db, env, &relation);
                             when = when.and(storage, next);
                             source_order = storage.ordered_source_order(source_order, next_order);
@@ -974,6 +996,7 @@ impl<'db> SolutionWalker<'db> {
             return ControlFlow::Continue(());
         };
         let has_no_evidence = evidence.evidence_lower.is_none() && !evidence.upper.has_evidence();
+        let relation_session = Rc::clone(&storage.relation_session);
         let is_preservable_typevar = |ty| {
             let Type::TypeVar(typevar) = ty else {
                 return false;
@@ -988,7 +1011,12 @@ impl<'db> SolutionWalker<'db> {
                                 .declared_constraints
                                 .iter()
                                 .any(|declared| {
-                                    actual.is_equivalent_to(db, env, declared.constrained_ty)
+                                    relation_session.is_equivalent_eager(
+                                        db,
+                                        env,
+                                        *actual,
+                                        declared.constrained_ty,
+                                    )
                                 })
                         })
                     })
@@ -998,7 +1026,7 @@ impl<'db> SolutionWalker<'db> {
         let has_bare_preservable_typevar_evidence =
             evidence.evidence_lower.is_some_and(is_preservable_typevar)
                 || evidence
-                    .as_single_upper_bound(db, env)
+                    .as_single_upper_bound(db, env, &relation_session)
                     .is_some_and(is_preservable_typevar);
         let has_non_concrete_evidence = has_no_evidence
             || evidence.has_only_non_concrete_evidence == Some(true)
@@ -1009,7 +1037,7 @@ impl<'db> SolutionWalker<'db> {
                 .evidence_lower
                 .is_some_and(contains_preservable_typevar)
                 || evidence
-                    .as_single_upper_bound(db, env)
+                    .as_single_upper_bound(db, env, &relation_session)
                     .is_some_and(contains_preservable_typevar);
 
             let mut potentially_satisfied_constraint_count = 0;
@@ -1155,12 +1183,17 @@ impl<'db> SolutionWalker<'db> {
         // A constraint preferred over every potentially valid alternative will also be preferred
         // over any subset of those alternatives. Try it first so that a successful branch can
         // discard the dominated alternatives before they multiply with later typevars.
-        let preferred =
-            constrained_typevar.preferred_constraint(db, env, has_lower_bound_evidence, |idx| {
+        let preferred = constrained_typevar.preferred_constraint(
+            db,
+            env,
+            &storage.relation_session,
+            has_lower_bound_evidence,
+            |idx| {
                 constrained_typevar.declared_constraints[idx]
                     .constraints
                     .is_some()
-            });
+            },
+        );
         if let Some(preferred) = preferred
             && self.validate_single_declared_constraint(
                 db,
@@ -1223,10 +1256,13 @@ impl<'db> SolutionWalker<'db> {
 
         // At this point, we know that more than one constraint was satisfied. Check to see if any
         // one of them is preferred over all of the others. If so, we prefer that single solution.
-        let preferred =
-            constrained_typevar.preferred_constraint(db, env, has_lower_bound_evidence, |idx| {
-                constraint_satisfied[idx]
-            });
+        let preferred = constrained_typevar.preferred_constraint(
+            db,
+            env,
+            &storage.relation_session,
+            has_lower_bound_evidence,
+            |idx| constraint_satisfied[idx],
+        );
 
         // If there was a single preferred constraint, remove the solutions from the other
         // constraints. Otherwise keep them all, and let the caller decide how to handle the
@@ -1813,6 +1849,7 @@ impl<'db> Constrained<'db> {
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        session: &Rc<RelationSession<'db>>,
         has_lower_bound_evidence: bool,
         is_eligible: impl Fn(usize) -> bool,
     ) -> Option<usize> {
@@ -1830,8 +1867,10 @@ impl<'db> Constrained<'db> {
                 }
 
                 let other = other_constraint.constrained_ty;
-                let candidate_assignable_to_other = candidate.is_assignable_to(db, env, other);
-                let other_assignable_to_candidate = other.is_assignable_to(db, env, candidate);
+                let candidate_assignable_to_other =
+                    session.is_assignable_eager(db, env, candidate, other);
+                let other_assignable_to_candidate =
+                    session.is_assignable_eager(db, env, other, candidate);
 
                 // Lower-bound evidence asks for the narrowest compatible declared constraint
                 // above the lower bound. With only upper-bound evidence, ask for the widest

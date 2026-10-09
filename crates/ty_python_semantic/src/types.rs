@@ -164,6 +164,7 @@ mod mro;
 pub(crate) mod narrow;
 mod newtype;
 mod overrides;
+mod projection;
 mod protocol_class;
 mod recursive;
 pub(crate) use recursive::RecursiveMapping;
@@ -515,6 +516,7 @@ pub(crate) struct ApplyTypeMappingVisitor<'env, 'db> {
     env: &'env ProgramEnvironment<'db>,
     normalization: TypeNormalization,
     recursion_context: Option<&'env TypeRecursionContext<'db>>,
+    projection: Option<Rc<projection::TypeProjectionMapping<'env, 'db>>>,
     /// Whether materialization also transforms type-variable bounds and defaults.
     materialize_typevar_bounds_and_defaults: bool,
     default: OnceCell<Box<TypeTransformer<'db, ApplyTypeMappingTag>>>,
@@ -533,6 +535,7 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
             env,
             normalization: TypeNormalization::Semantic,
             recursion_context: None,
+            projection: None,
             materialize_typevar_bounds_and_defaults: true,
             default: OnceCell::default(),
             top_materialization: OnceCell::default(),
@@ -553,6 +556,14 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
 
     fn with_recursion_context(mut self, context: Option<&'env TypeRecursionContext<'db>>) -> Self {
         self.recursion_context = context;
+        self
+    }
+
+    fn with_projection(
+        mut self,
+        projection: Option<&'env projection::TypeProjection<'db>>,
+    ) -> Self {
+        self.projection = projection.map(|projection| Rc::new(projection.mapping()));
         self
     }
 
@@ -613,6 +624,8 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
             })
     }
 
+    /// Start a distinct mapping with fresh caches while preserving the observation context.
+    /// Cached type results cannot be shared between different specialization bindings.
     fn for_new_mapping(&self) -> Self {
         let materialization_equivalence = OnceCell::new();
         let was_empty =
@@ -622,11 +635,13 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
         Self {
             materialization_equivalence,
             recursion_context: self.recursion_context,
+            projection: self.projection.clone(),
             normalization: self.normalization,
             materialize_typevar_bounds_and_defaults: self.materialize_typevar_bounds_and_defaults,
             ..Self::new(self.env)
         }
     }
+
     /// Fork a structural substitution while retaining the current observation's origins.
     /// A constructor must not inherit semantic normalization from its caller: simplifying
     /// a complement or union can otherwise unfold a growing reference before it is observed.
@@ -3522,10 +3537,11 @@ impl<'db> Type<'db> {
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        parent_constraints: &ConstraintSetBuilder<'db>,
         target: Type<'db>,
         inferable: TypeVarSet<'db>,
     ) -> DiscardDisjointUnionElementsResult<'db> {
-        let constraints = ConstraintSetBuilder::new();
+        let constraints = parent_constraints.child();
         let filtered = self.filter_union(db, env, |elem| {
             !elem
                 .when_disjoint_from(db, env, target, &constraints, inferable)
@@ -6966,6 +6982,7 @@ impl<'db> Type<'db> {
                                 env,
                                 self_instance,
                                 bound_method.typing_self_type(db),
+                                &Rc::default(),
                             )
                         {
                             specialized.overloads
@@ -9571,6 +9588,20 @@ impl<'db> Type<'db> {
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
     ) -> Type<'db> {
+        let mapped = self.apply_type_mapping_inner(db, type_mapping, tcx, visitor);
+        if let Some(projection) = &visitor.projection {
+            projection.record(self, mapped);
+        }
+        mapped
+    }
+
+    fn apply_type_mapping_inner<'a>(
+        self,
+        db: &'db dyn Db,
+        type_mapping: &TypeMapping<'a, 'db>,
+        tcx: TypeContext<'db>,
+        visitor: &ApplyTypeMappingVisitor<'_, 'db>,
+    ) -> Type<'db> {
         // If we are binding `typing.Self`, and this type is what we are binding `Self` to, return
         // early. This is not just an optimization, it also prevents us from infinitely expanding
         // the type, if it's something that can contain a `Self` reference.
@@ -9649,7 +9680,8 @@ impl<'db> Type<'db> {
                 // the expansion to avoid exponential blowup.
                 const MAX_PARAMSPEC_EXPANSION: usize = 64;
 
-                let mut expanded_callables = UnionBuilder::new(db, visitor.env);
+                let mut expanded_callables =
+                    UnionBuilder::new(db, visitor.env).normalization(visitor.normalization);
                 let mut expansion_size = 1usize;
                 for (_, union) in &union_paramspecs {
                     expansion_size = expansion_size.saturating_mul(union.elements(db).len());
@@ -9692,7 +9724,12 @@ impl<'db> Type<'db> {
 
                         // Use a fresh visitor, as the visitor cache does not distinguish
                         // between these specialization bindings.
-                        let callable = self.apply_type_mapping(db, visitor.env, &mapping, tcx);
+                        let callable = self.apply_type_mapping_impl(
+                            db,
+                            &mapping,
+                            tcx,
+                            &visitor.for_new_mapping(),
+                        );
                         expanded_callables.add_in_place(callable);
                     }
 

@@ -6182,6 +6182,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let result = next_bindings.finalize_argument_inference(
             db,
             self.program_environment(),
+            constraints,
             &converged_argument_types,
             &self.dataclass_field_specifiers,
         );
@@ -7243,6 +7244,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .discard_disjoint_union_elements(
                     db,
                     env,
+                    &ConstraintSetBuilder::new(),
                     Type::homogeneous_tuple(db, env, Type::unknown()),
                     inferable,
                 )
@@ -7671,7 +7673,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let tcx = tcx.map(|annotation| {
             let collection_ty = collection_class.to_instance(db, env);
             annotation
-                .discard_disjoint_union_elements(db, env, collection_ty, inferable)
+                .discard_disjoint_union_elements(db, env, &constraints, collection_ty, inferable)
                 .or_never()
         });
 
@@ -7728,7 +7730,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                 let path_bounds =
                     identity_instance.assignable_solutions_with_inferable(db, env, tcx, inferable);
-                let solutions = path_bounds.solve_with(|variance, path_bound| {
+                let solutions = path_bounds.solve_with(&constraints, |variance, path_bound| {
                     let identity = path_bound.bound_typevar.identity(db);
                     elt_tcx_variance
                         .entry(identity)

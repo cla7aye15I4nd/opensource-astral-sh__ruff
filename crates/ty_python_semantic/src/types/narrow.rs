@@ -878,7 +878,7 @@ fn intersect_narrowing_types<'db>(
                 ))
             })
             .unwrap_or_else(|| IntersectionType::from_two_elements(db, env, subject, target)),
-        (Type::Recursive(recursive), target) => visitor
+        (Type::Recursive(recursive), target) if recursive.is_alias(db) => visitor
             .visit(db, (subject, target), || {
                 recursive
                     .unfold(db, env)
